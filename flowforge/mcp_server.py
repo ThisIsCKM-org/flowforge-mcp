@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import argparse
+import sys
+
 from .config import FlowForgeConfig
 from .service import FlowForgeService
 
@@ -278,6 +281,54 @@ def create_mcp():
     return mcp
 
 
-def main() -> None:
-    create_mcp().run()
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="flowforge-mcp",
+        description="Run the FlowForge MCP server.",
+    )
+    parser.add_argument(
+        "transport",
+        nargs="?",
+        default="stdio",
+        choices=["stdio", "streamable-http", "http", "sse"],
+        help="Transport to use. Use streamable-http for shared office deployments.",
+    )
+    parser.add_argument("--host", default="127.0.0.1", help="HTTP host to bind when using an HTTP transport.")
+    parser.add_argument("--port", type=int, default=8765, help="HTTP port to bind when using an HTTP transport.")
+    parser.add_argument("--path", default="/mcp", help="HTTP MCP endpoint path.")
+    parser.add_argument("--log-level", default=None, help="Optional server log level.")
+    parser.add_argument("--allowed-host", action="append", default=[], help="Allowed Host header value for HTTP transports.")
+    parser.add_argument("--allowed-origin", action="append", default=[], help="Allowed Origin header value for HTTP transports.")
+    parser.add_argument("--stateless", action="store_true", help="Run HTTP transport in stateless mode.")
+    return parser.parse_args(argv)
+
+
+def run_server(args: argparse.Namespace) -> None:
+    mcp = create_mcp()
+    if args.transport == "stdio":
+        if sys.stderr.isatty():
+            print("FlowForge MCP running on stdio. Press Ctrl-C once to stop.", file=sys.stderr)
+        mcp.run(transport="stdio", log_level=args.log_level)
+        return
+
+    mcp.run(
+        transport=args.transport,
+        host=args.host,
+        port=args.port,
+        path=args.path,
+        log_level=args.log_level,
+        allowed_hosts=args.allowed_host or None,
+        allowed_origins=args.allowed_origin or None,
+        stateless=args.stateless,
+    )
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+    try:
+        run_server(args)
+    except KeyboardInterrupt:
+        if sys.stderr.isatty():
+            print("\nFlowForge MCP stopped.", file=sys.stderr)
+        return
 

@@ -32,11 +32,23 @@ data/flowforge.db
 
 ## Run
 
+Local MCP clients usually launch FlowForge over stdio:
+
 ```bash
 uv run flowforge-mcp
 ```
 
-or:
+When run manually, the stdio server waits for MCP JSON-RPC messages on stdin. Press `Ctrl-C` once to stop it.
+
+For a shared office stack, run Streamable HTTP on a single MCP endpoint:
+
+```bash
+uv run flowforge-mcp streamable-http --host 127.0.0.1 --port 8765 --path /mcp
+```
+
+Use `--allowed-host` and `--allowed-origin` when exposing the HTTP transport behind internal infrastructure. Keep `127.0.0.1` for local testing, and put authentication/reverse-proxy controls in front before exposing it to a wider network.
+
+You can also run the entrypoint directly:
 
 ```bash
 python3 server.py
