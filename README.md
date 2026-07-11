@@ -1,3 +1,3 @@
 # FlowForge MCP
 
-Development branch placeholder. Implementation is on the initial branch.
+Development branch placeholder. Implementation is on the initial-implementation branch.
