@@ -1,4 +1,11 @@
+import base64
+from pathlib import Path
 import sqlite3
+
+import pytest
+
+from flowforge.config import FlowForgeConfig
+from flowforge.service import FlowForgeService
 
 
 def test_default_template_seeds_reopened(service):
@@ -123,3 +130,126 @@ def test_search_like_fallback(service):
     results = service.search_tasks("fallback search", project_id=project["id"])
 
     assert [item["id"] for item in results] == [task["id"]]
+
+def _image_data(value: bytes = b"fake-png") -> str:
+    return base64.b64encode(value).decode("ascii")
+
+
+def test_task_image_attachments_support_multiple_images(service):
+    project = service.create_project({"name": "Images"})
+    task = service.create_task({"project_id": project["id"], "title": "Add screenshots"})
+
+    first = service.add_task_image_attachment(task["id"], "before.png", "image/png", _image_data(b"before"), "Before state")
+    second = service.add_task_image_attachment(task["id"], "after.jpg", "image/jpeg", _image_data(b"after"))
+    attachments = service.list_task_image_attachments(task["id"])
+
+    assert [attachment["id"] for attachment in attachments] == [first["id"], second["id"]]
+    assert attachments[0]["filename"] == "before.png"
+    assert attachments[0]["size_bytes"] == len(b"before")
+    assert "data_base64" not in attachments[0]
+
+
+def test_comment_image_attachments_support_multiple_images(service):
+    project = service.create_project({"name": "Comment Images"})
+    task = service.create_task({"project_id": project["id"], "title": "Review screenshot"})
+    comment = service.create_task_comment({"task_id": task["id"], "content": "See these two states"})
+
+    first = service.add_comment_image_attachment(comment["id"], "one.png", "image/png", _image_data(b"one"))
+    second = service.add_comment_image_attachment(comment["id"], "two.png", "image/png", _image_data(b"two"))
+    attachments = service.list_comment_image_attachments(comment["id"])
+
+    assert [attachment["id"] for attachment in attachments] == [first["id"], second["id"]]
+    assert all("data_base64" not in attachment for attachment in attachments)
+
+
+def test_get_task_includes_image_attachment_metadata(service):
+    project = service.create_project({"name": "Task Metadata"})
+    task = service.create_task({"project_id": project["id"], "title": "Capture bug"})
+    comment = service.create_task_comment({"task_id": task["id"], "content": "Screenshot attached"})
+    service.add_task_image_attachment(task["id"], "task.png", "image/png", _image_data(b"task"))
+    service.add_comment_image_attachment(comment["id"], "comment.png", "image/png", _image_data(b"comment"))
+
+    fetched = service.get_task(task["id"])
+
+    assert fetched["image_attachments"][0]["filename"] == "task.png"
+    assert "data_base64" not in fetched["image_attachments"][0]
+    assert fetched["comments"][0]["image_attachments"][0]["filename"] == "comment.png"
+    assert "data_base64" not in fetched["comments"][0]["image_attachments"][0]
+
+
+def test_get_image_attachment_can_include_base64_data(service):
+    project = service.create_project({"name": "Round Trip"})
+    task = service.create_task({"project_id": project["id"], "title": "Store image"})
+    raw = b"image-bytes"
+    attachment = service.add_task_image_attachment(task["id"], "image.webp", "image/webp", _image_data(raw))
+
+    metadata = service.get_image_attachment(attachment["id"])
+    with_data = service.get_image_attachment(attachment["id"], include_data=True)
+
+    assert "data_base64" not in metadata
+    assert base64.b64decode(with_data["data_base64"]) == raw
+
+
+def test_image_attachment_validation(service, tmp_path):
+    project = service.create_project({"name": "Validation"})
+    task = service.create_task({"project_id": project["id"], "title": "Validate"})
+
+    with pytest.raises(ValueError, match="content_type"):
+        service.add_task_image_attachment(task["id"], "note.txt", "text/plain", _image_data())
+    with pytest.raises(ValueError, match="valid base64"):
+        service.add_task_image_attachment(task["id"], "broken.png", "image/png", "not base64")
+    with pytest.raises(ValueError, match="exactly one"):
+        service._create_image_attachment({"filename": "missing.png", "content_type": "image/png", "data_base64": _image_data()})
+
+    limited = FlowForgeService(FlowForgeConfig(db_path=tmp_path / "limited.db", max_image_bytes=3))
+    limited_project = limited.create_project({"name": "Limited"})
+    limited_task = limited.create_task({"project_id": limited_project["id"], "title": "Too large"})
+    with pytest.raises(ValueError, match="maximum size"):
+        limited.add_task_image_attachment(limited_task["id"], "large.png", "image/png", _image_data(b"1234"))
+
+
+def test_image_attachments_cascade_with_task_and_comment_deletes(service):
+    project = service.create_project({"name": "Cascade"})
+    task = service.create_task({"project_id": project["id"], "title": "Delete task"})
+    comment = service.create_task_comment({"task_id": task["id"], "content": "Delete comment"})
+    task_attachment = service.add_task_image_attachment(task["id"], "task.png", "image/png", _image_data(b"task"))
+    comment_attachment = service.add_comment_image_attachment(comment["id"], "comment.png", "image/png", _image_data(b"comment"))
+
+    service.delete_task_comment(comment["id"])
+    assert service.list_task_image_attachments(task["id"])[0]["id"] == task_attachment["id"]
+    with pytest.raises(ValueError, match="not found"):
+        service.get_image_attachment(comment_attachment["id"])
+
+    service.delete_task(task["id"])
+    with pytest.raises(ValueError, match="not found"):
+        service.get_image_attachment(task_attachment["id"])
+
+
+
+def test_get_task_display_exports_attachment_files(service):
+    project = service.create_project({"name": "Display"})
+    task = service.create_task(
+        {
+            "project_id": project["id"],
+            "title": "Show screenshot",
+            "description": "Evidence attached",
+            "tags": ["display"],
+        }
+    )
+    comment = service.create_task_comment({"task_id": task["id"], "content": "Comment screenshot"})
+    task_raw = b"task-image"
+    comment_raw = b"comment-image"
+    service.add_task_image_attachment(task["id"], "task screenshot.png", "image/png", _image_data(task_raw), "Task screenshot")
+    service.add_comment_image_attachment(comment["id"], "comment.png", "image/png", _image_data(comment_raw), "Comment screenshot")
+
+    display = service.get_task_display(task["id"])
+
+    assert "# Task #" in display["markdown"]
+    assert "![Task screenshot](" in display["markdown"]
+    assert "![Comment screenshot](" in display["markdown"]
+    assert len(display["exported_attachments"]) == 1
+    exported_task_path = Path(display["exported_attachments"][0]["export_path"])
+    assert exported_task_path.is_absolute()
+    assert exported_task_path.read_bytes() == task_raw
+    comment_path_text = display["markdown"].split("![Comment screenshot](", 1)[1].split(")", 1)[0]
+    assert Path(comment_path_text).read_bytes() == comment_raw

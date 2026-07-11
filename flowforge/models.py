@@ -86,3 +86,10 @@ class CreateComment(BaseModel):
 class UpdateComment(BaseModel):
     content: str
 
+class CreateImageAttachment(BaseModel):
+    task_id: int | None = None
+    comment_id: int | None = None
+    filename: str
+    content_type: str
+    data_base64: str
+    alt_text: str | None = None

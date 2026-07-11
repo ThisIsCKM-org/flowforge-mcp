@@ -1,3 +1,5 @@
+import pytest
+
 from flowforge.mcp_server import SERVER_DESCRIPTION, create_mcp, parse_args
 
 
@@ -6,9 +8,20 @@ def test_server_description_mentions_work_units():
     assert "helpdesk-reference" in SERVER_DESCRIPTION
 
 
-def test_create_mcp_smoke():
+@pytest.mark.anyio
+async def test_create_mcp_registers_image_attachment_tools():
     mcp = create_mcp()
-    assert mcp is not None
+    tools = {tool.name for tool in await mcp.list_tools()}
+
+    assert {
+        "add_task_image_attachment",
+        "list_task_image_attachments",
+        "add_comment_image_attachment",
+        "list_comment_image_attachments",
+        "get_image_attachment",
+        "delete_image_attachment",
+        "get_task_display",
+    } <= tools
 
 
 def test_parse_args_defaults_to_stdio():

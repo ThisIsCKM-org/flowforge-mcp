@@ -1,6 +1,6 @@
 # FlowForge MCP
 
-FlowForge MCP is a local-first task-management MCP server for projects, Work Units, tasks, tags, comments, keyword search, and external helpdesk references.
+FlowForge MCP is a local-first task-management MCP server for projects, Work Units, tasks, tags, comments, image attachments, keyword search, and external helpdesk references.
 
 A **Work Unit** is a user-visible feature, milestone, deliverable, or initiative. It groups related tasks so humans and AI agents can discuss progress at the level of meaningful outcomes instead of individual chores.
 
@@ -12,6 +12,7 @@ A **Work Unit** is a user-visible feature, milestone, deliverable, or initiative
 - Tasks that can belong to a Work Unit or stand alone directly under a project
 - Tags with case-insensitive normalization
 - Comments on tasks
+- Multiple image attachments on tasks and comments
 - Optional project-scoped `helpdesk_ref_id` on tasks
 - Keyword search via SQLite FTS5 with a LIKE fallback
 - MCP tools over stdio using FastMCP
@@ -28,6 +29,18 @@ If unset, it defaults to:
 
 ```text
 data/flowforge.db
+```
+
+Image attachments are stored as SQLite BLOBs. The default limit is 10 MiB per image and can be changed with:
+
+```bash
+export FLOWFORGE_MAX_IMAGE_BYTES=10485760
+```
+
+Rendered task displays export attachment files to `/tmp/flowforge-attachments` by default. Override that path with:
+
+```bash
+export FLOWFORGE_ATTACHMENT_EXPORT_DIR=/absolute/path/to/rendered-flowforge-images
 ```
 
 ## Run
@@ -71,6 +84,49 @@ tool_timeout_sec = 120
 
 [mcp_servers.flowforge.env]
 FLOWFORGE_DB_PATH = "/absolute/path/to/flowforge-mcp/data/flowforge.db"
+```
+
+## Image Attachments
+
+Task and comment image attachments use base64 at the MCP boundary and store bytes as SQLite BLOBs. Listing tools return metadata only; fetch bytes explicitly with `get_image_attachment(..., include_data=True)`. For a user-friendly task view with inline images, use `get_task_display(task_id)`. It exports stored images to local files and returns markdown with absolute image paths.
+
+Attach multiple images to a task:
+
+```python
+add_task_image_attachment(
+    task_id=42,
+    filename="before.png",
+    content_type="image/png",
+    data_base64="iVBORw0KGgo...",
+    alt_text="Before fixing the layout",
+)
+add_task_image_attachment(
+    task_id=42,
+    filename="after.png",
+    content_type="image/png",
+    data_base64="iVBORw0KGgo...",
+)
+```
+
+Attach multiple images to a comment:
+
+```python
+add_comment_image_attachment(
+    comment_id=17,
+    filename="error-state.webp",
+    content_type="image/webp",
+    data_base64="UklGRiQAAABXRUJQVlA4...",
+)
+```
+
+Useful attachment tools:
+
+```python
+list_task_image_attachments(task_id=42)
+list_comment_image_attachments(comment_id=17)
+get_image_attachment(attachment_id=5, include_data=True)
+delete_image_attachment(attachment_id=5)
+get_task_display(task_id=42)
 ```
 
 ## Branch Model

@@ -130,6 +130,26 @@ SCHEMA: tuple[str, ...] = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS image_attachments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER,
+        comment_id INTEGER,
+        filename TEXT NOT NULL,
+        content_type TEXT NOT NULL,
+        image_data BLOB NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        alt_text TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        CHECK (
+            (task_id IS NOT NULL AND comment_id IS NULL)
+            OR (task_id IS NULL AND comment_id IS NOT NULL)
+        ),
+        FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+        FOREIGN KEY(comment_id) REFERENCES task_comments(id) ON DELETE CASCADE
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS tags (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
