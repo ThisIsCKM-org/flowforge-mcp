@@ -1,0 +1,6 @@
+{
+  "branches": {
+    "develop": "develop",
+    "main": "main"
+  }
+}
