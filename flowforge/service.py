@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import binascii
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -9,6 +12,7 @@ from .db.connection import connect, rows_to_dicts
 from .db.schema import DEFAULT_STATUSES, initialize
 from .models import (
     CreateComment,
+    CreateImageAttachment,
     CreateProject,
     CreateProjectTemplate,
     CreateTask,
@@ -365,8 +369,23 @@ class FlowForgeService:
             if row is None:
                 raise ValueError(f"Task {task_id} not found.")
             result = self._decorate_task(conn, row)
-            result["comments"] = self.list_task_comments(task_id)
+            result["image_attachments"] = self._list_image_attachments(conn, task_id=task_id)
+            result["comments"] = self._list_task_comments(conn, task_id, include_attachments=True)
         return result
+
+    def get_task_display(self, task_id: int) -> dict:
+        task = self.get_task(task_id)
+        with connect(self.config.db_path) as conn:
+            task_attachments = self._export_image_attachments(conn, task_id=task_id, task_id_for_path=task_id)
+            comments = self._list_task_comments(conn, task_id, include_attachments=False)
+            for comment in comments:
+                comment["image_attachments"] = self._export_image_attachments(
+                    conn,
+                    comment_id=comment["id"],
+                    task_id_for_path=task_id,
+                )
+        markdown = self._task_display_markdown(task, task_attachments, comments)
+        return {"task_id": task_id, "markdown": markdown, "exported_attachments": task_attachments}
 
     def get_task_by_helpdesk_ref(self, project_id: int, helpdesk_ref_id: str) -> dict:
         matches = self.list_tasks(project_id=project_id, helpdesk_ref_id=helpdesk_ref_id)
@@ -436,19 +455,16 @@ class FlowForgeService:
 
     def list_task_comments(self, task_id: int) -> list[dict]:
         with connect(self.config.db_path) as conn:
-            return rows_to_dicts(
-                conn.execute(
-                    "SELECT * FROM task_comments WHERE task_id = ? ORDER BY created_at, id",
-                    (task_id,),
-                ).fetchall()
-            )
+            return self._list_task_comments(conn, task_id, include_attachments=True)
 
     def get_task_comment(self, comment_id: int) -> dict:
         with connect(self.config.db_path) as conn:
             row = conn.execute("SELECT * FROM task_comments WHERE id = ?", (comment_id,)).fetchone()
             if row is None:
                 raise ValueError(f"Comment {comment_id} not found.")
-            return dict(row)
+            result = dict(row)
+            result["image_attachments"] = self._list_image_attachments(conn, comment_id=comment_id)
+            return result
 
     def update_task_comment(self, comment_id: int, payload: UpdateComment | dict) -> dict:
         payload = UpdateComment.model_validate(payload)
@@ -487,6 +503,115 @@ class FlowForgeService:
             conn.execute("DELETE FROM task_comments WHERE id = ?", (comment_id,))
             self._refresh_project_search(conn, row["project_id"])
         return {"comment_id": comment_id, "deleted": True}
+
+    def add_task_image_attachment(
+        self,
+        task_id: int,
+        filename: str,
+        content_type: str,
+        data_base64: str,
+        alt_text: str | None = None,
+    ) -> dict:
+        return self._create_image_attachment(
+            {
+                "task_id": task_id,
+                "filename": filename,
+                "content_type": content_type,
+                "data_base64": data_base64,
+                "alt_text": alt_text,
+            }
+        )
+
+    def list_task_image_attachments(self, task_id: int) -> list[dict]:
+        with connect(self.config.db_path) as conn:
+            task = conn.execute("SELECT id FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if task is None:
+                raise ValueError(f"Task {task_id} not found.")
+            return self._list_image_attachments(conn, task_id=task_id)
+
+    def add_comment_image_attachment(
+        self,
+        comment_id: int,
+        filename: str,
+        content_type: str,
+        data_base64: str,
+        alt_text: str | None = None,
+    ) -> dict:
+        return self._create_image_attachment(
+            {
+                "comment_id": comment_id,
+                "filename": filename,
+                "content_type": content_type,
+                "data_base64": data_base64,
+                "alt_text": alt_text,
+            }
+        )
+
+    def list_comment_image_attachments(self, comment_id: int) -> list[dict]:
+        with connect(self.config.db_path) as conn:
+            comment = conn.execute("SELECT id FROM task_comments WHERE id = ?", (comment_id,)).fetchone()
+            if comment is None:
+                raise ValueError(f"Comment {comment_id} not found.")
+            return self._list_image_attachments(conn, comment_id=comment_id)
+
+    def get_image_attachment(self, attachment_id: int, include_data: bool = False) -> dict:
+        with connect(self.config.db_path) as conn:
+            row = conn.execute("SELECT * FROM image_attachments WHERE id = ?", (attachment_id,)).fetchone()
+            if row is None:
+                raise ValueError(f"Image attachment {attachment_id} not found.")
+            return self._format_image_attachment(row, include_data=include_data)
+
+    def delete_image_attachment(self, attachment_id: int) -> dict:
+        with connect(self.config.db_path) as conn:
+            row = conn.execute("SELECT id FROM image_attachments WHERE id = ?", (attachment_id,)).fetchone()
+            if row is None:
+                raise ValueError(f"Image attachment {attachment_id} not found.")
+            conn.execute("DELETE FROM image_attachments WHERE id = ?", (attachment_id,))
+        return {"attachment_id": attachment_id, "deleted": True}
+
+    def _create_image_attachment(self, payload: CreateImageAttachment | dict) -> dict:
+        payload = CreateImageAttachment.model_validate(payload)
+        if (payload.task_id is None) == (payload.comment_id is None):
+            raise ValueError("Image attachment must belong to exactly one task or comment.")
+        filename = payload.filename.strip()
+        if not filename:
+            raise ValueError("Image attachment filename cannot be empty.")
+        content_type = payload.content_type.strip().lower()
+        if not content_type.startswith("image/"):
+            raise ValueError("Image attachment content_type must start with 'image/'.")
+        try:
+            image_data = base64.b64decode(payload.data_base64, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise ValueError("Image attachment data_base64 must be valid base64.") from exc
+        if len(image_data) > self.config.max_image_bytes:
+            raise ValueError(f"Image attachment exceeds maximum size of {self.config.max_image_bytes} bytes.")
+        with connect(self.config.db_path) as conn:
+            if payload.task_id is not None:
+                owner = conn.execute("SELECT id FROM tasks WHERE id = ?", (payload.task_id,)).fetchone()
+                if owner is None:
+                    raise ValueError(f"Task {payload.task_id} not found.")
+            if payload.comment_id is not None:
+                owner = conn.execute("SELECT id FROM task_comments WHERE id = ?", (payload.comment_id,)).fetchone()
+                if owner is None:
+                    raise ValueError(f"Comment {payload.comment_id} not found.")
+            cursor = conn.execute(
+                """
+                INSERT INTO image_attachments
+                (task_id, comment_id, filename, content_type, image_data, size_bytes, alt_text)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    payload.task_id,
+                    payload.comment_id,
+                    filename,
+                    content_type,
+                    image_data,
+                    len(image_data),
+                    payload.alt_text,
+                ),
+            )
+            attachment_id = int(cursor.lastrowid)
+        return self.get_image_attachment(attachment_id)
 
     def create_tag(self, name: str) -> dict:
         with connect(self.config.db_path) as conn:
@@ -688,6 +813,127 @@ class FlowForgeService:
                 (entity_id,),
             ).fetchall()
         ]
+
+    def _list_task_comments(self, conn, task_id: int, include_attachments: bool = False) -> list[dict]:
+        comments = rows_to_dicts(
+            conn.execute(
+                "SELECT * FROM task_comments WHERE task_id = ? ORDER BY created_at, id",
+                (task_id,),
+            ).fetchall()
+        )
+        if include_attachments:
+            for comment in comments:
+                comment["image_attachments"] = self._list_image_attachments(conn, comment_id=comment["id"])
+        return comments
+
+    def _list_image_attachments(
+        self,
+        conn,
+        task_id: int | None = None,
+        comment_id: int | None = None,
+    ) -> list[dict]:
+        if (task_id is None) == (comment_id is None):
+            raise ValueError("Image attachment lookup needs exactly one owner.")
+        owner_column = "task_id" if task_id is not None else "comment_id"
+        owner_id = task_id if task_id is not None else comment_id
+        return [
+            self._format_image_attachment(row)
+            for row in conn.execute(
+                f"""
+                SELECT *
+                FROM image_attachments
+                WHERE {owner_column} = ?
+                ORDER BY created_at, id
+                """,
+                (owner_id,),
+            ).fetchall()
+        ]
+
+    def _format_image_attachment(self, row, include_data: bool = False) -> dict:
+        result = dict(row)
+        image_data = result.pop("image_data")
+        if include_data:
+            result["data_base64"] = base64.b64encode(image_data).decode("ascii")
+        return result
+
+    def _export_image_attachments(
+        self,
+        conn,
+        task_id_for_path: int,
+        task_id: int | None = None,
+        comment_id: int | None = None,
+    ) -> list[dict]:
+        if (task_id is None) == (comment_id is None):
+            raise ValueError("Image attachment export needs exactly one owner.")
+        owner_column = "task_id" if task_id is not None else "comment_id"
+        owner_id = task_id if task_id is not None else comment_id
+        exported = []
+        for row in conn.execute(
+            f"""
+            SELECT *
+            FROM image_attachments
+            WHERE {owner_column} = ?
+            ORDER BY created_at, id
+            """,
+            (owner_id,),
+        ).fetchall():
+            metadata = self._format_image_attachment(row)
+            export_path = self._export_image_attachment_file(row, task_id_for_path)
+            metadata["export_path"] = str(export_path)
+            exported.append(metadata)
+        return exported
+
+    def _export_image_attachment_file(self, row, task_id: int) -> Path:
+        export_dir = self.config.attachment_export_dir / f"task-{task_id}"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        filename = self._safe_attachment_filename(row["id"], row["filename"])
+        export_path = export_dir / filename
+        export_path.write_bytes(row["image_data"])
+        return export_path
+
+    def _safe_attachment_filename(self, attachment_id: int, filename: str) -> str:
+        normalized = re.sub(r"[^A-Za-z0-9._-]+", "-", filename.strip()).strip(".-")
+        if not normalized:
+            normalized = "image"
+        return f"attachment-{attachment_id}-{normalized}"
+
+    def _task_display_markdown(self, task: dict, task_attachments: list[dict], comments: list[dict]) -> str:
+        lines = [
+            f"# Task #{task['id']}: {task['title']}",
+            "",
+            f"- Project: #{task['project_id']}",
+            f"- Helpdesk: {task.get('helpdesk_ref_id') or 'none'}",
+            f"- Status: {task.get('status')}",
+            f"- Priority: {task.get('priority')}",
+            f"- Assignee: {task.get('assignee') or 'none'}",
+            f"- Due date: {task.get('due_date') or 'none'}",
+            f"- Tags: {', '.join(task.get('tags') or []) or 'none'}",
+            "",
+        ]
+        if task.get("description"):
+            lines.extend(["## Description", "", task["description"], ""])
+        lines.extend(self._attachment_markdown("Attachments", task_attachments))
+        if comments:
+            lines.extend(["## Comments", ""])
+            for comment in comments:
+                author = comment.get("author") or "unknown"
+                lines.extend([f"### Comment #{comment['id']} by {author}", "", comment["content"], ""])
+                lines.extend(self._attachment_markdown("Comment attachments", comment.get("image_attachments") or []))
+        return "\n".join(lines).rstrip() + "\n"
+
+    def _attachment_markdown(self, title: str, attachments: list[dict]) -> list[str]:
+        if not attachments:
+            return []
+        lines = [f"## {title}", ""]
+        for attachment in attachments:
+            alt_text = attachment.get("alt_text") or attachment["filename"]
+            lines.extend([
+                f"### Attachment #{attachment['id']}: {attachment['filename']}",
+                "",
+                f"![{alt_text}]({attachment['export_path']})",
+                "",
+            ])
+        return lines
 
     def _decorate_task(self, conn, row) -> dict:
         result = dict(row)
