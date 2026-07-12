@@ -11,12 +11,14 @@ WorkUnitType = Literal["feature", "milestone", "deliverable", "initiative"]
 
 class CreateProject(BaseModel):
     name: str
+    key: str | None = None
     description: str | None = None
     template_id: int | None = None
 
 
 class UpdateProject(BaseModel):
     name: str | None = None
+    key: str | None = None
     description: str | None = None
 
 
@@ -30,6 +32,7 @@ class CreateProjectTemplate(BaseModel):
 class CreateWorkUnit(BaseModel):
     project_id: int
     title: str
+    key: str | None = None
     description: str | None = None
     type: WorkUnitType = "feature"
     status: str | None = None
@@ -41,6 +44,7 @@ class CreateWorkUnit(BaseModel):
 
 class UpdateWorkUnit(BaseModel):
     title: str | None = None
+    key: str | None = None
     description: str | None = None
     type: WorkUnitType | None = None
     status: str | None = None
@@ -53,6 +57,7 @@ class UpdateWorkUnit(BaseModel):
 class CreateTask(BaseModel):
     project_id: int
     title: str
+    key: str | None = None
     description: str | None = None
     work_unit_id: int | None = None
     status: str = "Todo"
@@ -66,6 +71,7 @@ class CreateTask(BaseModel):
 
 class UpdateTask(BaseModel):
     title: str | None = None
+    key: str | None = None
     description: str | None = None
     work_unit_id: int | None = None
     status: str | None = None

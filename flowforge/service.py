@@ -9,7 +9,7 @@ from typing import Any
 
 from .config import FlowForgeConfig
 from .db.connection import connect, rows_to_dicts
-from .db.schema import DEFAULT_STATUSES, initialize
+from .db.schema import DEFAULT_STATUSES, default_entity_key, initialize, normalize_entity_key
 from .models import (
     CreateComment,
     CreateImageAttachment,
@@ -112,9 +112,10 @@ class FlowForgeService:
         payload = CreateProject.model_validate(payload)
         with connect(self.config.db_path) as conn:
             template_id = payload.template_id or self._default_template_id(conn)
+            key = self._project_key(conn, payload.key, payload.name)
             cursor = conn.execute(
-                "INSERT INTO projects (name, description, template_id) VALUES (?, ?, ?)",
-                (payload.name, payload.description, template_id),
+                "INSERT INTO projects (key, name, description, template_id) VALUES (?, ?, ?, ?)",
+                (key, payload.name, payload.description, template_id),
             )
             project_id = int(cursor.lastrowid)
             status_id_by_key = self._seed_project_statuses(conn, project_id, template_id)
@@ -126,9 +127,9 @@ class FlowForgeService:
         sql = "SELECT * FROM projects"
         params: list[Any] = []
         if search:
-            sql += " WHERE LOWER(name) LIKE ? OR LOWER(COALESCE(description, '')) LIKE ?"
+            sql += " WHERE LOWER(key) LIKE ? OR LOWER(name) LIKE ? OR LOWER(COALESCE(description, '')) LIKE ?"
             term = f"%{search.lower()}%"
-            params.extend([term, term])
+            params.extend([term, term, term])
         sql += " ORDER BY updated_at DESC, id DESC"
         with connect(self.config.db_path) as conn:
             return rows_to_dicts(conn.execute(sql, params).fetchall())
@@ -142,11 +143,59 @@ class FlowForgeService:
             result["statuses"] = self.list_project_statuses(project_id)
         return result
 
+    def get_project_by_key(self, project_key: str) -> dict:
+        return self.get_project(self.project_id_for_key(project_key))
+
+    def project_id_for_key(self, project_key: str) -> int:
+        key = normalize_entity_key(project_key, "PROJECT")
+        with connect(self.config.db_path) as conn:
+            row = conn.execute("SELECT id FROM projects WHERE key = ?", (key,)).fetchone()
+            if row is None:
+                raise ValueError(f"Project key {key!r} not found.")
+            return int(row["id"])
+
+    def work_unit_id_for_key(self, project_key: str, work_unit_key: str) -> int:
+        project_id = self.project_id_for_key(project_key)
+        key = normalize_entity_key(work_unit_key, "WU")
+        with connect(self.config.db_path) as conn:
+            row = conn.execute(
+                "SELECT id FROM work_units WHERE project_id = ? AND key = ?",
+                (project_id, key),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"Work Unit key {key!r} not found in project {project_key!r}.")
+            return int(row["id"])
+
+    def task_id_for_key(self, task_key: str, project_key: str | None = None) -> int:
+        key = normalize_entity_key(task_key, "TASK")
+        with connect(self.config.db_path) as conn:
+            params: list[Any] = [key]
+            sql = "SELECT t.id FROM tasks t"
+            if project_key is not None:
+                sql += " JOIN projects p ON p.id = t.project_id WHERE t.key = ? AND p.key = ?"
+                params.append(normalize_entity_key(project_key, "PROJECT"))
+            else:
+                sql += " WHERE t.key = ?"
+            rows = conn.execute(sql, params).fetchall()
+            if not rows:
+                scope = f" in project {project_key!r}" if project_key is not None else ""
+                raise ValueError(f"Task key {key!r} not found{scope}.")
+            if len(rows) > 1:
+                raise ValueError(f"Task key {key!r} exists in multiple projects. Provide project_key.")
+            return int(rows[0]["id"])
+
     def update_project(self, project_id: int, payload: UpdateProject | dict) -> dict:
         payload = UpdateProject.model_validate(payload)
         updates = payload.model_dump(exclude_unset=True)
-        if updates:
-            self._update_row("projects", project_id, updates)
+        with connect(self.config.db_path) as conn:
+            row = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+            if row is None:
+                raise ValueError(f"Project {project_id} not found.")
+            if "key" in updates:
+                updates["key"] = normalize_entity_key(updates["key"], default_entity_key(row["name"], "PROJECT"))
+            if updates:
+                self._update_row_with_conn(conn, "projects", project_id, updates)
+                self._refresh_project_search(conn, project_id)
         return self.get_project(project_id)
 
     def list_project_statuses(self, project_id: int) -> list[dict]:
@@ -162,14 +211,16 @@ class FlowForgeService:
         payload = CreateWorkUnit.model_validate(payload)
         with connect(self.config.db_path) as conn:
             status_id = self._status_id(conn, payload.project_id, payload.status or "Planning")
+            key = self._work_unit_key(conn, payload.project_id, payload.key, payload.title)
             cursor = conn.execute(
                 """
                 INSERT INTO work_units
-                (project_id, title, description, type, status_id, priority, start_date, target_date)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (project_id, key, title, description, type, status_id, priority, start_date, target_date)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     payload.project_id,
+                    key,
                     payload.title,
                     payload.description,
                     payload.type,
@@ -204,9 +255,9 @@ class FlowForgeService:
             clauses.append("wu.priority = ?")
             params.append(priority)
         if search:
-            clauses.append("(LOWER(wu.title) LIKE ? OR LOWER(COALESCE(wu.description, '')) LIKE ?)")
+            clauses.append("(LOWER(wu.key) LIKE ? OR LOWER(wu.title) LIKE ? OR LOWER(COALESCE(wu.description, '')) LIKE ?)")
             term = f"%{search.lower()}%"
-            params.extend([term, term])
+            params.extend([term, term, term])
         sql = """
             SELECT wu.*, ps.name AS status, ps.key AS status_key
             FROM work_units wu
@@ -239,6 +290,9 @@ class FlowForgeService:
             result["progress"] = self.get_work_unit_progress(work_unit_id)
         return result
 
+    def get_work_unit_by_key(self, project_key: str, work_unit_key: str) -> dict:
+        return self.get_work_unit(self.work_unit_id_for_key(project_key, work_unit_key))
+
     def update_work_unit(self, work_unit_id: int, payload: UpdateWorkUnit | dict) -> dict:
         payload = UpdateWorkUnit.model_validate(payload)
         updates = payload.model_dump(exclude_unset=True)
@@ -249,6 +303,8 @@ class FlowForgeService:
                 raise ValueError(f"Work unit {work_unit_id} not found.")
             if "status" in updates:
                 updates["status_id"] = self._status_id(conn, row["project_id"], updates.pop("status"))
+            if "key" in updates:
+                updates["key"] = normalize_entity_key(updates["key"], default_entity_key(row["title"], "WU"))
             if updates:
                 self._update_row_with_conn(conn, "work_units", work_unit_id, updates)
             if tags is not None:
@@ -279,15 +335,17 @@ class FlowForgeService:
             position = payload.position
             if position is None:
                 position = self._next_task_position(conn, payload.project_id, status_id)
+            key = self._task_key(conn, payload.project_id, payload.work_unit_id, payload.key)
             cursor = conn.execute(
                 """
                 INSERT INTO tasks
-                (project_id, work_unit_id, status_id, title, description, helpdesk_ref_id, priority, assignee, due_date, position)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (project_id, work_unit_id, key, status_id, title, description, helpdesk_ref_id, priority, assignee, due_date, position)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     payload.project_id,
                     payload.work_unit_id,
+                    key,
                     status_id,
                     payload.title,
                     payload.description,
@@ -335,11 +393,11 @@ class FlowForgeService:
             clauses.append("LOWER(COALESCE(t.helpdesk_ref_id, '')) = ?")
             params.append(helpdesk_ref_id.lower())
         if search:
-            clauses.append("(LOWER(t.title) LIKE ? OR LOWER(COALESCE(t.description, '')) LIKE ? OR LOWER(COALESCE(t.helpdesk_ref_id, '')) LIKE ?)")
+            clauses.append("(LOWER(t.key) LIKE ? OR LOWER(t.title) LIKE ? OR LOWER(COALESCE(t.description, '')) LIKE ? OR LOWER(COALESCE(t.helpdesk_ref_id, '')) LIKE ?)")
             term = f"%{search.lower()}%"
-            params.extend([term, term, term])
+            params.extend([term, term, term, term])
         sql = """
-            SELECT t.*, ps.name AS status, ps.key AS status_key, wu.title AS work_unit_title
+            SELECT t.*, ps.name AS status, ps.key AS status_key, wu.title AS work_unit_title, wu.key AS work_unit_key
             FROM tasks t
             JOIN project_statuses ps ON ps.id = t.status_id
             LEFT JOIN work_units wu ON wu.id = t.work_unit_id
@@ -358,7 +416,7 @@ class FlowForgeService:
         with connect(self.config.db_path) as conn:
             row = conn.execute(
                 """
-                SELECT t.*, ps.name AS status, ps.key AS status_key, wu.title AS work_unit_title
+                SELECT t.*, ps.name AS status, ps.key AS status_key, wu.title AS work_unit_title, wu.key AS work_unit_key
                 FROM tasks t
                 JOIN project_statuses ps ON ps.id = t.status_id
                 LEFT JOIN work_units wu ON wu.id = t.work_unit_id
@@ -372,6 +430,9 @@ class FlowForgeService:
             result["image_attachments"] = self._list_image_attachments(conn, task_id=task_id)
             result["comments"] = self._list_task_comments(conn, task_id, include_attachments=True)
         return result
+
+    def get_task_by_key(self, task_key: str, project_key: str | None = None) -> dict:
+        return self.get_task(self.task_id_for_key(task_key, project_key))
 
     def get_task_display(self, task_id: int) -> dict:
         task = self.get_task(task_id)
@@ -403,6 +464,8 @@ class FlowForgeService:
                 raise ValueError(f"Task {task_id} not found.")
             if "status" in updates:
                 updates["status_id"] = self._status_id(conn, row["project_id"], updates.pop("status"))
+            if "key" in updates:
+                updates["key"] = normalize_entity_key(updates["key"], default_entity_key(row["title"], "TASK"))
             if updates:
                 self._update_row_with_conn(conn, "tasks", task_id, updates)
             if tags is not None:
@@ -686,6 +749,80 @@ class FlowForgeService:
             raise ValueError("Default template is missing.")
         return int(row["id"])
 
+    def _project_key(self, conn, explicit_key: str | None, name: str) -> str:
+        if explicit_key:
+            return normalize_entity_key(explicit_key, default_entity_key(name, "PROJECT"))
+        return self._next_available_key(conn, "projects", default_entity_key(name, "PROJECT"))
+
+    def _work_unit_key(self, conn, project_id: int, explicit_key: str | None, title: str) -> str:
+        if explicit_key:
+            return normalize_entity_key(explicit_key, default_entity_key(title, "WU"))
+        return self._next_available_key(
+            conn,
+            "work_units",
+            default_entity_key(title, "WU"),
+            "project_id = ?",
+            [project_id],
+        )
+
+    def _task_key(self, conn, project_id: int, work_unit_id: int | None, explicit_key: str | None) -> str:
+        if explicit_key:
+            return normalize_entity_key(explicit_key, "TASK")
+        prefix_row = None
+        if work_unit_id is not None:
+            prefix_row = conn.execute(
+                "SELECT key FROM work_units WHERE id = ? AND project_id = ?",
+                (work_unit_id, project_id),
+            ).fetchone()
+            if prefix_row is None:
+                raise ValueError(f"Work unit {work_unit_id} not found in project {project_id}.")
+        else:
+            prefix_row = conn.execute("SELECT key FROM projects WHERE id = ?", (project_id,)).fetchone()
+            if prefix_row is None:
+                raise ValueError(f"Project {project_id} not found.")
+        prefix = normalize_entity_key(prefix_row["key"], "TASK")
+        row = conn.execute(
+            "SELECT key FROM tasks WHERE project_id = ? AND key LIKE ? ORDER BY id",
+            (project_id, f"{prefix}-%"),
+        ).fetchall()
+        used = {item["key"] for item in row}
+        sequence = 1
+        while f"{prefix}-{sequence}" in used:
+            sequence += 1
+        return f"{prefix}-{sequence}"
+
+    def _next_available_key(
+        self,
+        conn,
+        table: str,
+        base: str,
+        extra_clause: str | None = None,
+        extra_params: list[Any] | None = None,
+    ) -> str:
+        normalized_base = normalize_entity_key(base, "KEY")
+        key = normalized_base
+        suffix = 2
+        while self._key_exists(conn, table, key, extra_clause, extra_params or []):
+            key = f"{normalized_base}{suffix}"
+            suffix += 1
+        return key
+
+    def _key_exists(
+        self,
+        conn,
+        table: str,
+        key: str,
+        extra_clause: str | None = None,
+        extra_params: list[Any] | None = None,
+    ) -> bool:
+        clauses = ["key = ?"]
+        params: list[Any] = [key]
+        if extra_clause:
+            clauses.append(extra_clause)
+            params.extend(extra_params or [])
+        row = conn.execute(f"SELECT 1 FROM {table} WHERE {' AND '.join(clauses)} LIMIT 1", params).fetchone()
+        return row is not None
+
     def _seed_project_statuses(self, conn, project_id: int, template_id: int) -> dict[str, int]:
         statuses = conn.execute(
             "SELECT * FROM template_statuses WHERE template_id = ? ORDER BY position",
@@ -721,11 +858,12 @@ class FlowForgeService:
         for task in tasks:
             conn.execute(
                 """
-                INSERT INTO tasks (project_id, status_id, title, description, priority, position)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO tasks (project_id, key, status_id, title, description, priority, position)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     project_id,
+                    self._task_key(conn, project_id, None, None),
                     status_id_by_key.get(task["status_key"], status_id_by_key["todo"]),
                     task["title"],
                     task["description"],
@@ -899,9 +1037,10 @@ class FlowForgeService:
 
     def _task_display_markdown(self, task: dict, task_attachments: list[dict], comments: list[dict]) -> str:
         lines = [
-            f"# Task #{task['id']}: {task['title']}",
+            f"# Task {task.get('key') or '#' + str(task['id'])}: {task['title']}",
             "",
-            f"- Project: #{task['project_id']}",
+            f"- Key: {task.get('key') or 'none'}",
+            f"- Work Unit: {task.get('work_unit_key') or 'none'}",
             f"- Helpdesk: {task.get('helpdesk_ref_id') or 'none'}",
             f"- Status: {task.get('status')}",
             f"- Priority: {task.get('priority')}",
@@ -955,7 +1094,7 @@ class FlowForgeService:
         conn.execute("DELETE FROM search_index WHERE project_id = ?", (project_id,))
         task_rows = conn.execute(
             """
-            SELECT t.id, t.title, COALESCE(t.description, '') AS description, COALESCE(t.helpdesk_ref_id, '') AS helpdesk_ref_id
+            SELECT t.id, t.key, t.title, COALESCE(t.description, '') AS description, COALESCE(t.helpdesk_ref_id, '') AS helpdesk_ref_id
             FROM tasks t
             WHERE t.project_id = ?
             """,
@@ -972,11 +1111,11 @@ class FlowForgeService:
                 INSERT INTO search_index (entity_type, entity_id, project_id, title, body, tags, helpdesk_ref_id)
                 VALUES ('task', ?, ?, ?, ?, ?, ?)
                 """,
-                (task["id"], project_id, task["title"], f"{task['description']} {comments}", tags, task["helpdesk_ref_id"]),
+                (task["id"], project_id, f"{task['key']} {task['title']}", f"{task['description']} {comments}", tags, task["helpdesk_ref_id"]),
             )
         work_unit_rows = conn.execute(
             """
-            SELECT id, title, COALESCE(description, '') AS description
+            SELECT id, key, title, COALESCE(description, '') AS description
             FROM work_units
             WHERE project_id = ?
             """,
@@ -989,7 +1128,7 @@ class FlowForgeService:
                 INSERT INTO search_index (entity_type, entity_id, project_id, title, body, tags, helpdesk_ref_id)
                 VALUES ('work_unit', ?, ?, ?, ?, ?, '')
                 """,
-                (work_unit["id"], project_id, work_unit["title"], work_unit["description"], tags),
+                (work_unit["id"], project_id, f"{work_unit['key']} {work_unit['title']}", work_unit["description"], tags),
             )
 
     def _search_ids(self, entity_type: str, query: str, project_id: int | None, limit: int) -> list[int]:

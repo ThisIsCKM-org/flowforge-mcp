@@ -25,6 +25,85 @@ def test_project_creation_seeds_statuses(service):
     assert status_names == ["Planning", "Todo", "In Progress", "Review", "Done", "Blocked", "Reopened"]
 
 
+def test_generated_keys_for_projects_work_units_and_tasks(service):
+    project = service.create_project({"name": "Flowforge", "key": "FLOW"})
+    unit = service.create_work_unit({"project_id": project["id"], "title": "Flowforge MCP v1", "key": "FM1"})
+    first = service.create_task({"project_id": project["id"], "work_unit_id": unit["id"], "title": "Design schema"})
+    second = service.create_task({"project_id": project["id"], "work_unit_id": unit["id"], "title": "Wire API"})
+    standalone = service.create_task({"project_id": project["id"], "title": "Write README"})
+
+    assert project["key"] == "FLOW"
+    assert unit["key"] == "FM1"
+    assert first["key"] == "FM1-1"
+    assert second["key"] == "FM1-2"
+    assert standalone["key"] == "FLOW-1"
+
+
+def test_auto_generated_entity_keys_are_unique(service):
+    first = service.create_project({"name": "Flowforge"})
+    second = service.create_project({"name": "Flowforge"})
+    first_unit = service.create_work_unit({"project_id": first["id"], "title": "Flowforge MCP v1"})
+    second_unit = service.create_work_unit({"project_id": first["id"], "title": "Flowforge MCP v1"})
+
+    assert first["key"] == "FLOWFORGE"
+    assert second["key"] == "FLOWFORGE2"
+    assert first_unit["key"] == "FM1"
+    assert second_unit["key"] == "FM12"
+
+
+def test_duplicate_keys_are_rejected_in_scope(service):
+    project = service.create_project({"name": "Flowforge", "key": "FLOW"})
+    other_project = service.create_project({"name": "Other", "key": "OTHER"})
+    service.create_work_unit({"project_id": project["id"], "title": "One", "key": "FM1"})
+    task = service.create_task({"project_id": project["id"], "title": "One", "key": "FM1-1"})
+
+    with pytest.raises(sqlite3.IntegrityError):
+        service.create_project({"name": "Duplicate", "key": "FLOW"})
+    with pytest.raises(sqlite3.IntegrityError):
+        service.create_work_unit({"project_id": project["id"], "title": "Two", "key": "FM1"})
+    with pytest.raises(sqlite3.IntegrityError):
+        service.create_task({"project_id": project["id"], "title": "Two", "key": "FM1-1"})
+
+    other_task = service.create_task({"project_id": other_project["id"], "title": "Allowed", "key": "FM1-1"})
+    assert other_task["key"] == task["key"]
+
+
+def test_keys_are_searchable_and_rendered_in_task_display(service):
+    project = service.create_project({"name": "Flowforge", "key": "FLOW"})
+    unit = service.create_work_unit({"project_id": project["id"], "title": "Flowforge MCP v1", "key": "FM1"})
+    task = service.create_task({"project_id": project["id"], "work_unit_id": unit["id"], "title": "Add keys"})
+
+    assert service.list_projects(search="FLOW")[0]["id"] == project["id"]
+    assert service.search_work_units("FM1", project_id=project["id"])[0]["id"] == unit["id"]
+    assert service.search_tasks(task["key"], project_id=project["id"])[0]["id"] == task["id"]
+    markdown = service.get_task_display(task["id"])["markdown"]
+    assert f"# Task {task['key']}" in markdown
+    assert f"Project: #{project['id']}" not in markdown
+    assert "- Work Unit: FM1" in markdown
+
+
+def test_existing_database_without_key_columns_is_backfilled(tmp_path):
+    db_path = tmp_path / "legacy.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE projects (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, description TEXT, template_id INTEGER, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+        conn.execute("CREATE TABLE project_statuses (id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL, key TEXT NOT NULL, name TEXT NOT NULL, position INTEGER NOT NULL, is_started INTEGER NOT NULL DEFAULT 0, is_blocked INTEGER NOT NULL DEFAULT 0, is_terminal INTEGER NOT NULL DEFAULT 0, is_reopened INTEGER NOT NULL DEFAULT 0, UNIQUE(project_id, key))")
+        conn.execute("CREATE TABLE work_units (id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL, title TEXT NOT NULL, description TEXT, type TEXT NOT NULL DEFAULT 'feature', status_id INTEGER, priority TEXT NOT NULL DEFAULT 'medium', start_date TEXT, target_date TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+        conn.execute("CREATE TABLE tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL, work_unit_id INTEGER, status_id INTEGER NOT NULL, title TEXT NOT NULL, description TEXT, helpdesk_ref_id TEXT, priority TEXT NOT NULL DEFAULT 'medium', assignee TEXT, due_date TEXT, position INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(project_id, helpdesk_ref_id))")
+        project_id = conn.execute("INSERT INTO projects (name, description) VALUES ('Flowforge', NULL)").lastrowid
+        status_id = conn.execute("INSERT INTO project_statuses (project_id, key, name, position) VALUES (?, 'todo', 'Todo', 0)", (project_id,)).lastrowid
+        unit_id = conn.execute("INSERT INTO work_units (project_id, title, status_id) VALUES (?, 'Flowforge MCP v1', ?)", (project_id, status_id)).lastrowid
+        conn.execute("INSERT INTO tasks (project_id, work_unit_id, status_id, title) VALUES (?, ?, ?, 'Legacy task')", (project_id, unit_id, status_id))
+        conn.execute("INSERT INTO tasks (project_id, status_id, title) VALUES (?, ?, 'Standalone task')", (project_id, status_id))
+
+    migrated = FlowForgeService.for_path(db_path)
+    project = migrated.list_projects()[0]
+    unit = migrated.list_work_units(project_id=project["id"])[0]
+    tasks = migrated.list_tasks(project_id=project["id"])
+
+    assert project["key"] == "FLOWFORGE"
+    assert unit["key"] == "FM1"
+    assert {task["key"] for task in tasks} == {"FM1-1", "FLOWFORGE-1"}
+
 def test_task_tags_helpdesk_and_lookup(service):
     project = service.create_project({"name": "Support"})
     task = service.create_task(
@@ -244,7 +323,7 @@ def test_get_task_display_exports_attachment_files(service):
 
     display = service.get_task_display(task["id"])
 
-    assert "# Task #" in display["markdown"]
+    assert f"# Task {task['key']}" in display["markdown"]
     assert "![Task screenshot](" in display["markdown"]
     assert "![Comment screenshot](" in display["markdown"]
     assert len(display["exported_attachments"]) == 1

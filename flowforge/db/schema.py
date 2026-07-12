@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from .connection import connect
@@ -57,6 +58,7 @@ SCHEMA: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS projects (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        key TEXT,
         name TEXT NOT NULL,
         description TEXT,
         template_id INTEGER,
@@ -84,6 +86,7 @@ SCHEMA: tuple[str, ...] = (
     CREATE TABLE IF NOT EXISTS work_units (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         project_id INTEGER NOT NULL,
+        key TEXT,
         title TEXT NOT NULL,
         description TEXT,
         type TEXT NOT NULL DEFAULT 'feature',
@@ -102,6 +105,7 @@ SCHEMA: tuple[str, ...] = (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         project_id INTEGER NOT NULL,
         work_unit_id INTEGER,
+        key TEXT,
         status_id INTEGER NOT NULL,
         title TEXT NOT NULL,
         description TEXT,
@@ -183,8 +187,120 @@ def initialize(db_path: Path) -> None:
     with connect(db_path) as conn:
         for statement in SCHEMA:
             conn.execute(statement)
+        _migrate_entity_keys(conn)
         _initialize_search(conn)
         _seed_builtin_template(conn)
+
+
+def normalize_entity_key(value: str | None, fallback: str) -> str:
+    if value:
+        normalized = re.sub(r"[^A-Za-z0-9]+", "-", value.strip().upper()).strip("-")
+        if normalized:
+            return normalized
+    return fallback
+
+
+def default_entity_key(value: str | None, fallback: str) -> str:
+    tokens = re.findall(r"[A-Za-z0-9]+", value or "")
+    if not tokens:
+        return fallback
+    if len(tokens) == 1:
+        return normalize_entity_key(tokens[0], fallback)
+    parts = []
+    for token in tokens:
+        lowered = token.lower()
+        if lowered.startswith("v") and token[1:].isdigit():
+            parts.append(token[1:])
+        elif token.isdigit():
+            parts.append(token)
+        else:
+            parts.append(token[0])
+    return normalize_entity_key("".join(parts), fallback)
+
+
+def _migrate_entity_keys(conn) -> None:
+    _ensure_column(conn, "projects", "key", "TEXT")
+    _ensure_column(conn, "work_units", "key", "TEXT")
+    _ensure_column(conn, "tasks", "key", "TEXT")
+    _backfill_project_keys(conn)
+    _backfill_work_unit_keys(conn)
+    _backfill_task_keys(conn)
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_key ON projects(key)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_work_units_project_key ON work_units(project_id, key)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_project_key ON tasks(project_id, key)")
+
+
+def _ensure_column(conn, table: str, column: str, definition: str) -> None:
+    columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _backfill_project_keys(conn) -> None:
+    used: set[str] = set()
+    rows = conn.execute("SELECT id, key, name FROM projects ORDER BY id").fetchall()
+    for row in rows:
+        base = normalize_entity_key(row["key"], default_entity_key(row["name"], "PROJECT"))
+        key = _unique_key(base, used)
+        used.add(key)
+        if row["key"] != key:
+            conn.execute("UPDATE projects SET key = ? WHERE id = ?", (key, row["id"]))
+
+
+def _backfill_work_unit_keys(conn) -> None:
+    used_by_project: dict[int, set[str]] = {}
+    rows = conn.execute(
+        "SELECT id, project_id, key, title FROM work_units ORDER BY project_id, created_at, id"
+    ).fetchall()
+    for row in rows:
+        used = used_by_project.setdefault(int(row["project_id"]), set())
+        base = normalize_entity_key(row["key"], default_entity_key(row["title"], "WU"))
+        key = _unique_key(base, used)
+        used.add(key)
+        if row["key"] != key:
+            conn.execute("UPDATE work_units SET key = ? WHERE id = ?", (key, row["id"]))
+
+
+def _backfill_task_keys(conn) -> None:
+    counters: dict[tuple[int, str], int] = {}
+    used_by_project: dict[int, set[str]] = {}
+    rows = conn.execute(
+        """
+        SELECT
+            t.id,
+            t.project_id,
+            t.work_unit_id,
+            t.key,
+            p.key AS project_key,
+            wu.key AS work_unit_key
+        FROM tasks t
+        JOIN projects p ON p.id = t.project_id
+        LEFT JOIN work_units wu ON wu.id = t.work_unit_id
+        ORDER BY t.project_id, COALESCE(t.work_unit_id, 0), t.created_at, t.id
+        """
+    ).fetchall()
+    for row in rows:
+        project_id = int(row["project_id"])
+        used = used_by_project.setdefault(project_id, set())
+        if row["key"]:
+            key = _unique_key(normalize_entity_key(row["key"], "TASK"), used)
+        else:
+            prefix = normalize_entity_key(row["work_unit_key"] or row["project_key"], "TASK")
+            counter_key = (project_id, prefix)
+            counters[counter_key] = counters.get(counter_key, 0) + 1
+            key = _unique_key(f"{prefix}-{counters[counter_key]}", used)
+        used.add(key)
+        if row["key"] != key:
+            conn.execute("UPDATE tasks SET key = ? WHERE id = ?", (key, row["id"]))
+
+
+def _unique_key(base: str, used: set[str]) -> str:
+    key = base
+    suffix = 2
+    while key in used:
+        key = f"{base}{suffix}"
+        suffix += 1
+    return key
 
 
 def _initialize_search(conn) -> None:
