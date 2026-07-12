@@ -24,6 +24,24 @@ async def test_create_mcp_registers_image_attachment_tools():
     } <= tools
 
 
+@pytest.mark.anyio
+async def test_key_based_tools_do_not_require_numeric_ids():
+    mcp = create_mcp()
+    tools = {tool.name: tool for tool in await mcp.list_tools()}
+
+    create_task_schema = tools["create_task"].parameters["properties"]
+    get_task_schema = tools["get_task"].parameters["properties"]
+    list_projects_schema = tools["list_projects"].parameters["properties"]
+
+    assert "project_key" in create_task_schema
+    assert "work_unit_key" in create_task_schema
+    assert "project_id" not in create_task_schema
+    assert "work_unit_id" not in create_task_schema
+    assert "task_key" in get_task_schema
+    assert "task_id" not in get_task_schema
+    assert "include_ids" in list_projects_schema
+
+
 def test_parse_args_defaults_to_stdio():
     args = parse_args([])
 
