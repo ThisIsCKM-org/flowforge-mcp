@@ -92,7 +92,7 @@ class CreateComment(BaseModel):
 class UpdateComment(BaseModel):
     content: str
 
-class CreateImageAttachment(BaseModel):
+class CreateAttachment(BaseModel):
     task_id: int | None = None
     comment_id: int | None = None
     filename: str

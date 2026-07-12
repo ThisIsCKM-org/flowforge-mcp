@@ -214,6 +214,44 @@ def _image_data(value: bytes = b"fake-png") -> str:
     return base64.b64encode(value).decode("ascii")
 
 
+def _file_data(value: bytes = b"fake-bytes") -> str:
+    return base64.b64encode(value).decode("ascii")
+
+
+def test_task_file_attachments_support_non_images(service):
+    project = service.create_project({"name": "Files"})
+    task = service.create_task({"project_id": project["id"], "title": "Upload documents"})
+
+    docx = service.add_task_attachment(task["id"], "brief.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", _file_data(b"docx-bytes"))
+    txt = service.add_task_attachment(task["id"], "notes.txt", "text/plain", _file_data(b"txt-bytes"))
+    fetched = service.get_task(task["id"])
+    listed = service.list_task_attachments(task["id"])
+
+    assert [attachment["filename"] for attachment in listed] == ["brief.docx", "notes.txt"]
+    assert docx["content_type"].startswith("application/")
+    assert txt["content_type"] == "text/plain"
+    assert docx["size_bytes"] == len(b"docx-bytes")
+    assert txt["size_bytes"] == len(b"txt-bytes")
+    assert fetched["attachments"][0]["filename"] == "brief.docx"
+    assert fetched["attachments"][1]["filename"] == "notes.txt"
+    assert all(attachment["is_image"] is False for attachment in fetched["attachments"])
+
+
+def test_get_task_display_renders_non_images_as_links(service):
+    project = service.create_project({"name": "Display Files"})
+    task = service.create_task({"project_id": project["id"], "title": "Read attachment"})
+    comment = service.create_task_comment({"task_id": task["id"], "content": "See attached specs"})
+
+    service.add_task_attachment(task["id"], "spec.pdf", "application/pdf", _file_data(b"pdf-bytes"))
+    service.add_comment_attachment(comment["id"], "notes.csv", "text/csv", _file_data(b"csv-bytes"))
+
+    display = service.get_task_display(task["id"])
+    markdown = display["markdown"]
+
+    assert "[spec.pdf](" in markdown
+    assert "[notes.csv](" in markdown
+    assert "![](" not in markdown
+    assert len(display["exported_attachments"]) == 1
 def test_task_image_attachments_support_multiple_images(service):
     project = service.create_project({"name": "Images"})
     task = service.create_task({"project_id": project["id"], "title": "Add screenshots"})
@@ -273,18 +311,16 @@ def test_image_attachment_validation(service, tmp_path):
     project = service.create_project({"name": "Validation"})
     task = service.create_task({"project_id": project["id"], "title": "Validate"})
 
-    with pytest.raises(ValueError, match="content_type"):
-        service.add_task_image_attachment(task["id"], "note.txt", "text/plain", _image_data())
     with pytest.raises(ValueError, match="valid base64"):
-        service.add_task_image_attachment(task["id"], "broken.png", "image/png", "not base64")
+        service.add_task_attachment(task["id"], "broken.txt", "text/plain", "not base64")
     with pytest.raises(ValueError, match="exactly one"):
-        service._create_image_attachment({"filename": "missing.png", "content_type": "image/png", "data_base64": _image_data()})
+        service._create_attachment({"filename": "missing.png", "content_type": "image/png", "data_base64": _image_data()})
 
     limited = FlowForgeService(FlowForgeConfig(db_path=tmp_path / "limited.db", max_image_bytes=3))
     limited_project = limited.create_project({"name": "Limited"})
     limited_task = limited.create_task({"project_id": limited_project["id"], "title": "Too large"})
     with pytest.raises(ValueError, match="maximum size"):
-        limited.add_task_image_attachment(limited_task["id"], "large.png", "image/png", _image_data(b"1234"))
+        limited.add_task_attachment(limited_task["id"], "large.png", "image/png", _image_data(b"1234"))
 
 
 def test_image_attachments_cascade_with_task_and_comment_deletes(service):
