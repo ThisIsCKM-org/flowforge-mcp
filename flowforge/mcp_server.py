@@ -9,7 +9,7 @@ from .service import FlowForgeService
 
 SERVER_DESCRIPTION = (
     "FlowForge MCP provides local project, work-unit, task, tag, comment, "
-    "image-attachment, keyword-search, and helpdesk-reference management for AI agents and humans. "
+    "attachment, keyword-search, and helpdesk-reference management for AI agents and humans. "
     "Work Units represent meaningful chunks of value such as features, milestones, "
     "deliverables, or initiatives."
 )
@@ -273,7 +273,7 @@ def create_mcp():
         task = service.get_task_by_helpdesk_ref(project_id(project_key), helpdesk_ref_id)
         return public_entity(task, include_ids=include_ids)
 
-    @mcp.tool(description="Render a task key as user-friendly markdown with image attachments exported to local files.")
+    @mcp.tool(description="Render a task key as user-friendly markdown with exported attachments rendered as local file links or image previews.")
     def get_task_display(task_key: str, project_key: str | None = None, include_ids: bool = False) -> dict:
         task_numeric_id = task_id(task_key, project_key)
         display = service.get_task_display(task_numeric_id)
@@ -357,6 +357,57 @@ def create_mcp():
     def delete_task_comment(comment_id: int) -> dict:
         return service.delete_task_comment(comment_id)
 
+    @mcp.tool(description="Attach a file to a task key. Accepts base64 file data and stores it as a SQLite BLOB.")
+    def add_task_attachment(
+        task_key: str,
+        filename: str,
+        content_type: str,
+        data_base64: str,
+        alt_text: str | None = None,
+        project_key: str | None = None,
+        include_ids: bool = False,
+    ) -> dict:
+        attachment = service.add_task_attachment(
+            task_id=task_id(task_key, project_key),
+            filename=filename,
+            content_type=content_type,
+            data_base64=data_base64,
+            alt_text=alt_text,
+        )
+        return public_related(attachment, include_ids=include_ids)
+
+    @mcp.tool(description="List task attachment metadata for a task key without file bytes.")
+    def list_task_attachments(task_key: str, project_key: str | None = None, include_ids: bool = False) -> list[dict]:
+        return public_related(service.list_task_attachments(task_id(task_key, project_key)), include_ids=include_ids)
+
+    @mcp.tool(description="Attach a file to a task comment. Accepts base64 file data and stores it as a SQLite BLOB.")
+    def add_comment_attachment(
+        comment_id: int,
+        filename: str,
+        content_type: str,
+        data_base64: str,
+        alt_text: str | None = None,
+    ) -> dict:
+        return service.add_comment_attachment(
+            comment_id=comment_id,
+            filename=filename,
+            content_type=content_type,
+            data_base64=data_base64,
+            alt_text=alt_text,
+        )
+
+    @mcp.tool(description="List task comment attachment metadata without file bytes.")
+    def list_comment_attachments(comment_id: int) -> list[dict]:
+        return service.list_comment_attachments(comment_id)
+
+    @mcp.tool(description="Get attachment metadata, optionally including base64 file data.")
+    def get_attachment(attachment_id: int, include_data: bool = False) -> dict:
+        return service.get_attachment(attachment_id, include_data=include_data)
+
+    @mcp.tool(description="Delete an attachment from a task or comment.")
+    def delete_attachment(attachment_id: int) -> dict:
+        return service.delete_attachment(attachment_id)
+
     @mcp.tool(description="Attach an image to a task key. Accepts base64 image data and stores it as a SQLite BLOB.")
     def add_task_image_attachment(
         task_key: str,
@@ -367,18 +418,11 @@ def create_mcp():
         project_key: str | None = None,
         include_ids: bool = False,
     ) -> dict:
-        attachment = service.add_task_image_attachment(
-            task_id=task_id(task_key, project_key),
-            filename=filename,
-            content_type=content_type,
-            data_base64=data_base64,
-            alt_text=alt_text,
-        )
-        return public_related(attachment, include_ids=include_ids)
+        return add_task_attachment(task_key, filename, content_type, data_base64, alt_text=alt_text, project_key=project_key, include_ids=include_ids)
 
     @mcp.tool(description="List task image attachment metadata for a task key without image bytes.")
     def list_task_image_attachments(task_key: str, project_key: str | None = None, include_ids: bool = False) -> list[dict]:
-        return public_related(service.list_task_image_attachments(task_id(task_key, project_key)), include_ids=include_ids)
+        return list_task_attachments(task_key, project_key=project_key, include_ids=include_ids)
 
     @mcp.tool(description="Attach an image to a task comment. Accepts base64 image data and stores it as a SQLite BLOB.")
     def add_comment_image_attachment(
@@ -388,25 +432,19 @@ def create_mcp():
         data_base64: str,
         alt_text: str | None = None,
     ) -> dict:
-        return service.add_comment_image_attachment(
-            comment_id=comment_id,
-            filename=filename,
-            content_type=content_type,
-            data_base64=data_base64,
-            alt_text=alt_text,
-        )
+        return add_comment_attachment(comment_id, filename, content_type, data_base64, alt_text=alt_text)
 
     @mcp.tool(description="List task comment image attachment metadata without image bytes.")
     def list_comment_image_attachments(comment_id: int) -> list[dict]:
-        return service.list_comment_image_attachments(comment_id)
+        return list_comment_attachments(comment_id)
 
     @mcp.tool(description="Get image attachment metadata, optionally including base64 image data.")
     def get_image_attachment(attachment_id: int, include_data: bool = False) -> dict:
-        return service.get_image_attachment(attachment_id, include_data=include_data)
+        return get_attachment(attachment_id, include_data=include_data)
 
     @mcp.tool(description="Delete an image attachment from a task or comment.")
     def delete_image_attachment(attachment_id: int) -> dict:
-        return service.delete_image_attachment(attachment_id)
+        return delete_attachment(attachment_id)
 
     @mcp.tool(description="List tags with optional search.")
     def list_tags(search: str | None = None) -> list[dict]:

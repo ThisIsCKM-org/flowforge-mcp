@@ -11,8 +11,8 @@ from .config import FlowForgeConfig
 from .db.connection import connect, rows_to_dicts
 from .db.schema import DEFAULT_STATUSES, default_entity_key, initialize, normalize_entity_key
 from .models import (
+    CreateAttachment,
     CreateComment,
-    CreateImageAttachment,
     CreateProject,
     CreateProjectTemplate,
     CreateTask,
@@ -427,7 +427,9 @@ class FlowForgeService:
             if row is None:
                 raise ValueError(f"Task {task_id} not found.")
             result = self._decorate_task(conn, row)
-            result["image_attachments"] = self._list_image_attachments(conn, task_id=task_id)
+            attachments = self._list_attachments(conn, task_id=task_id)
+            result["attachments"] = attachments
+            result["image_attachments"] = attachments
             result["comments"] = self._list_task_comments(conn, task_id, include_attachments=True)
         return result
 
@@ -437,10 +439,10 @@ class FlowForgeService:
     def get_task_display(self, task_id: int) -> dict:
         task = self.get_task(task_id)
         with connect(self.config.db_path) as conn:
-            task_attachments = self._export_image_attachments(conn, task_id=task_id, task_id_for_path=task_id)
+            task_attachments = self._export_attachments(conn, task_id=task_id, task_id_for_path=task_id)
             comments = self._list_task_comments(conn, task_id, include_attachments=False)
             for comment in comments:
-                comment["image_attachments"] = self._export_image_attachments(
+                comment["attachments"] = self._export_attachments(
                     conn,
                     comment_id=comment["id"],
                     task_id_for_path=task_id,
@@ -526,7 +528,9 @@ class FlowForgeService:
             if row is None:
                 raise ValueError(f"Comment {comment_id} not found.")
             result = dict(row)
-            result["image_attachments"] = self._list_image_attachments(conn, comment_id=comment_id)
+            attachments = self._list_attachments(conn, comment_id=comment_id)
+            result["attachments"] = attachments
+            result["image_attachments"] = attachments
             return result
 
     def update_task_comment(self, comment_id: int, payload: UpdateComment | dict) -> dict:
@@ -567,7 +571,7 @@ class FlowForgeService:
             self._refresh_project_search(conn, row["project_id"])
         return {"comment_id": comment_id, "deleted": True}
 
-    def add_task_image_attachment(
+    def add_task_attachment(
         self,
         task_id: int,
         filename: str,
@@ -575,7 +579,7 @@ class FlowForgeService:
         data_base64: str,
         alt_text: str | None = None,
     ) -> dict:
-        return self._create_image_attachment(
+        return self._create_attachment(
             {
                 "task_id": task_id,
                 "filename": filename,
@@ -585,14 +589,14 @@ class FlowForgeService:
             }
         )
 
-    def list_task_image_attachments(self, task_id: int) -> list[dict]:
+    def list_task_attachments(self, task_id: int) -> list[dict]:
         with connect(self.config.db_path) as conn:
             task = conn.execute("SELECT id FROM tasks WHERE id = ?", (task_id,)).fetchone()
             if task is None:
                 raise ValueError(f"Task {task_id} not found.")
-            return self._list_image_attachments(conn, task_id=task_id)
+            return self._list_attachments(conn, task_id=task_id)
 
-    def add_comment_image_attachment(
+    def add_comment_attachment(
         self,
         comment_id: int,
         filename: str,
@@ -600,7 +604,7 @@ class FlowForgeService:
         data_base64: str,
         alt_text: str | None = None,
     ) -> dict:
-        return self._create_image_attachment(
+        return self._create_attachment(
             {
                 "comment_id": comment_id,
                 "filename": filename,
@@ -610,44 +614,62 @@ class FlowForgeService:
             }
         )
 
-    def list_comment_image_attachments(self, comment_id: int) -> list[dict]:
+    def list_comment_attachments(self, comment_id: int) -> list[dict]:
         with connect(self.config.db_path) as conn:
             comment = conn.execute("SELECT id FROM task_comments WHERE id = ?", (comment_id,)).fetchone()
             if comment is None:
                 raise ValueError(f"Comment {comment_id} not found.")
-            return self._list_image_attachments(conn, comment_id=comment_id)
+            return self._list_attachments(conn, comment_id=comment_id)
 
-    def get_image_attachment(self, attachment_id: int, include_data: bool = False) -> dict:
+    def get_attachment(self, attachment_id: int, include_data: bool = False) -> dict:
         with connect(self.config.db_path) as conn:
             row = conn.execute("SELECT * FROM image_attachments WHERE id = ?", (attachment_id,)).fetchone()
             if row is None:
-                raise ValueError(f"Image attachment {attachment_id} not found.")
-            return self._format_image_attachment(row, include_data=include_data)
+                raise ValueError(f"Attachment {attachment_id} not found.")
+            return self._format_attachment(row, include_data=include_data)
 
-    def delete_image_attachment(self, attachment_id: int) -> dict:
+    def delete_attachment(self, attachment_id: int) -> dict:
         with connect(self.config.db_path) as conn:
             row = conn.execute("SELECT id FROM image_attachments WHERE id = ?", (attachment_id,)).fetchone()
             if row is None:
-                raise ValueError(f"Image attachment {attachment_id} not found.")
+                raise ValueError(f"Attachment {attachment_id} not found.")
             conn.execute("DELETE FROM image_attachments WHERE id = ?", (attachment_id,))
         return {"attachment_id": attachment_id, "deleted": True}
 
-    def _create_image_attachment(self, payload: CreateImageAttachment | dict) -> dict:
-        payload = CreateImageAttachment.model_validate(payload)
+    def add_task_image_attachment(self, task_id: int, filename: str, content_type: str, data_base64: str, alt_text: str | None = None) -> dict:
+        return self.add_task_attachment(task_id, filename, content_type, data_base64, alt_text)
+
+    def list_task_image_attachments(self, task_id: int) -> list[dict]:
+        return self.list_task_attachments(task_id)
+
+    def add_comment_image_attachment(self, comment_id: int, filename: str, content_type: str, data_base64: str, alt_text: str | None = None) -> dict:
+        return self.add_comment_attachment(comment_id, filename, content_type, data_base64, alt_text)
+
+    def list_comment_image_attachments(self, comment_id: int) -> list[dict]:
+        return self.list_comment_attachments(comment_id)
+
+    def get_image_attachment(self, attachment_id: int, include_data: bool = False) -> dict:
+        return self.get_attachment(attachment_id, include_data=include_data)
+
+    def delete_image_attachment(self, attachment_id: int) -> dict:
+        return self.delete_attachment(attachment_id)
+
+    def _create_attachment(self, payload: CreateAttachment | dict) -> dict:
+        payload = CreateAttachment.model_validate(payload)
         if (payload.task_id is None) == (payload.comment_id is None):
-            raise ValueError("Image attachment must belong to exactly one task or comment.")
+            raise ValueError("Attachment must belong to exactly one task or comment.")
         filename = payload.filename.strip()
         if not filename:
-            raise ValueError("Image attachment filename cannot be empty.")
+            raise ValueError("Attachment filename cannot be empty.")
         content_type = payload.content_type.strip().lower()
-        if not content_type.startswith("image/"):
-            raise ValueError("Image attachment content_type must start with 'image/'.")
+        if not content_type:
+            raise ValueError("Attachment content_type cannot be empty.")
         try:
-            image_data = base64.b64decode(payload.data_base64, validate=True)
+            file_data = base64.b64decode(payload.data_base64, validate=True)
         except (binascii.Error, ValueError) as exc:
-            raise ValueError("Image attachment data_base64 must be valid base64.") from exc
-        if len(image_data) > self.config.max_image_bytes:
-            raise ValueError(f"Image attachment exceeds maximum size of {self.config.max_image_bytes} bytes.")
+            raise ValueError("Attachment data_base64 must be valid base64.") from exc
+        if len(file_data) > self.config.max_image_bytes:
+            raise ValueError(f"Attachment exceeds maximum size of {self.config.max_image_bytes} bytes.")
         with connect(self.config.db_path) as conn:
             if payload.task_id is not None:
                 owner = conn.execute("SELECT id FROM tasks WHERE id = ?", (payload.task_id,)).fetchone()
@@ -668,13 +690,16 @@ class FlowForgeService:
                     payload.comment_id,
                     filename,
                     content_type,
-                    image_data,
-                    len(image_data),
+                    file_data,
+                    len(file_data),
                     payload.alt_text,
                 ),
             )
             attachment_id = int(cursor.lastrowid)
-        return self.get_image_attachment(attachment_id)
+        return self.get_attachment(attachment_id)
+
+    def _create_image_attachment(self, payload: CreateAttachment | dict) -> dict:
+        return self._create_attachment(payload)
 
     def create_tag(self, name: str) -> dict:
         with connect(self.config.db_path) as conn:
@@ -961,21 +986,23 @@ class FlowForgeService:
         )
         if include_attachments:
             for comment in comments:
-                comment["image_attachments"] = self._list_image_attachments(conn, comment_id=comment["id"])
+                attachments = self._list_attachments(conn, comment_id=comment["id"])
+                comment["attachments"] = attachments
+                comment["image_attachments"] = attachments
         return comments
 
-    def _list_image_attachments(
+    def _list_attachments(
         self,
         conn,
         task_id: int | None = None,
         comment_id: int | None = None,
     ) -> list[dict]:
         if (task_id is None) == (comment_id is None):
-            raise ValueError("Image attachment lookup needs exactly one owner.")
+            raise ValueError("Attachment lookup needs exactly one owner.")
         owner_column = "task_id" if task_id is not None else "comment_id"
         owner_id = task_id if task_id is not None else comment_id
         return [
-            self._format_image_attachment(row)
+            self._format_attachment(row)
             for row in conn.execute(
                 f"""
                 SELECT *
@@ -987,14 +1014,15 @@ class FlowForgeService:
             ).fetchall()
         ]
 
-    def _format_image_attachment(self, row, include_data: bool = False) -> dict:
+    def _format_attachment(self, row, include_data: bool = False) -> dict:
         result = dict(row)
-        image_data = result.pop("image_data")
+        file_data = result.pop("image_data")
+        result["is_image"] = result["content_type"].startswith("image/")
         if include_data:
-            result["data_base64"] = base64.b64encode(image_data).decode("ascii")
+            result["data_base64"] = base64.b64encode(file_data).decode("ascii")
         return result
 
-    def _export_image_attachments(
+    def _export_attachments(
         self,
         conn,
         task_id_for_path: int,
@@ -1002,7 +1030,7 @@ class FlowForgeService:
         comment_id: int | None = None,
     ) -> list[dict]:
         if (task_id is None) == (comment_id is None):
-            raise ValueError("Image attachment export needs exactly one owner.")
+            raise ValueError("Attachment export needs exactly one owner.")
         owner_column = "task_id" if task_id is not None else "comment_id"
         owner_id = task_id if task_id is not None else comment_id
         exported = []
@@ -1015,13 +1043,13 @@ class FlowForgeService:
             """,
             (owner_id,),
         ).fetchall():
-            metadata = self._format_image_attachment(row)
-            export_path = self._export_image_attachment_file(row, task_id_for_path)
+            metadata = self._format_attachment(row)
+            export_path = self._export_attachment_file(row, task_id_for_path)
             metadata["export_path"] = str(export_path)
             exported.append(metadata)
         return exported
 
-    def _export_image_attachment_file(self, row, task_id: int) -> Path:
+    def _export_attachment_file(self, row, task_id: int) -> Path:
         export_dir = self.config.attachment_export_dir / f"task-{task_id}"
         export_dir.mkdir(parents=True, exist_ok=True)
         filename = self._safe_attachment_filename(row["id"], row["filename"])
@@ -1032,7 +1060,7 @@ class FlowForgeService:
     def _safe_attachment_filename(self, attachment_id: int, filename: str) -> str:
         normalized = re.sub(r"[^A-Za-z0-9._-]+", "-", filename.strip()).strip(".-")
         if not normalized:
-            normalized = "image"
+            normalized = "file"
         return f"attachment-{attachment_id}-{normalized}"
 
     def _task_display_markdown(self, task: dict, task_attachments: list[dict], comments: list[dict]) -> str:
@@ -1057,7 +1085,7 @@ class FlowForgeService:
             for comment in comments:
                 author = comment.get("author") or "unknown"
                 lines.extend([f"### Comment #{comment['id']} by {author}", "", comment["content"], ""])
-                lines.extend(self._attachment_markdown("Comment attachments", comment.get("image_attachments") or []))
+                lines.extend(self._attachment_markdown("Comment attachments", comment.get("attachments") or []))
         return "\n".join(lines).rstrip() + "\n"
 
     def _attachment_markdown(self, title: str, attachments: list[dict]) -> list[str]:
@@ -1065,13 +1093,14 @@ class FlowForgeService:
             return []
         lines = [f"## {title}", ""]
         for attachment in attachments:
-            alt_text = attachment.get("alt_text") or attachment["filename"]
-            lines.extend([
-                f"### Attachment #{attachment['id']}: {attachment['filename']}",
-                "",
-                f"![{alt_text}]({attachment['export_path']})",
-                "",
-            ])
+            lines.append(f"### Attachment #{attachment['id']}: {attachment['filename']}")
+            lines.append("")
+            if attachment.get("is_image"):
+                alt_text = attachment.get("alt_text") or attachment["filename"]
+                lines.append(f"![{alt_text}]({attachment['export_path']})")
+            else:
+                lines.append(f"[{attachment['filename']}]({attachment['export_path']})")
+            lines.append("")
         return lines
 
     def _decorate_task(self, conn, row) -> dict:

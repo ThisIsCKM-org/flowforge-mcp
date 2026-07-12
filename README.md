@@ -94,9 +94,9 @@ Keys are searchable through list/search tools and are included in task display m
 
 ## Image Attachments
 
-Task and comment image attachments use base64 at the MCP boundary and store bytes as SQLite BLOBs. Listing tools return metadata only; fetch bytes explicitly with `get_image_attachment(..., include_data=True)`. For a user-friendly task view with inline images, use `get_task_display(task_key)`. It exports stored images to local files and returns markdown with absolute image paths.
+Task and comment attachments use base64 at the MCP boundary and store bytes as SQLite BLOBs. Listing tools return metadata only; fetch bytes explicitly with `get_attachment(..., include_data=True)`. For a user-friendly task view with inline images and downloadable file links, use `get_task_display(task_key)`. It exports stored files to local paths and returns markdown with absolute image paths or links.
 
-Attach multiple images to a task:
+Attach a task file such as `.docx`, `.txt`, or `.png`:
 
 ```python
 add_task_image_attachment(
@@ -114,7 +114,7 @@ add_task_image_attachment(
 )
 ```
 
-Attach multiple images to a comment:
+Attach a comment file such as `.docx` or `.txt`:
 
 ```python
 add_comment_image_attachment(
