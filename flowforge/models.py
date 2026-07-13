@@ -29,6 +29,27 @@ class CreateProjectTemplate(BaseModel):
     starter_tasks: list[dict] = Field(default_factory=list)
 
 
+class CreateProjectStatus(BaseModel):
+    project_id: int
+    name: str
+    key: str | None = None
+    position: int | None = None
+    is_started: bool = False
+    is_blocked: bool = False
+    is_terminal: bool = False
+    is_reopened: bool = False
+
+
+class UpdateProjectStatus(BaseModel):
+    name: str | None = None
+    key: str | None = None
+    position: int | None = None
+    is_started: bool | None = None
+    is_blocked: bool | None = None
+    is_terminal: bool | None = None
+    is_reopened: bool | None = None
+
+
 class CreateWorkUnit(BaseModel):
     project_id: int
     title: str

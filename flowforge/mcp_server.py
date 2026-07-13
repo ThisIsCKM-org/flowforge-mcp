@@ -107,6 +107,62 @@ def create_mcp():
     def list_project_statuses(project_key: str, include_ids: bool = False) -> list[dict]:
         return public_statuses(service.list_project_statuses(project_id(project_key)), include_ids=include_ids)
 
+    @mcp.tool(description="Create a workflow status in a project key. The key defaults to a normalized form of the name.")
+    def create_project_status(
+        project_key: str,
+        name: str,
+        key: str | None = None,
+        position: int | None = None,
+        is_started: bool = False,
+        is_blocked: bool = False,
+        is_terminal: bool = False,
+        is_reopened: bool = False,
+        include_ids: bool = False,
+    ) -> dict:
+        status = service.create_project_status(
+            {
+                "project_id": project_id(project_key),
+                "name": name,
+                "key": key,
+                "position": position,
+                "is_started": is_started,
+                "is_blocked": is_blocked,
+                "is_terminal": is_terminal,
+                "is_reopened": is_reopened,
+            }
+        )
+        return public_statuses(status, include_ids=include_ids)
+
+    @mcp.tool(description="Update a workflow status by name or key within a project key.")
+    def update_project_status(
+        project_key: str,
+        status: str,
+        name: str | None = None,
+        key: str | None = None,
+        position: int | None = None,
+        is_started: bool | None = None,
+        is_blocked: bool | None = None,
+        is_terminal: bool | None = None,
+        is_reopened: bool | None = None,
+        include_ids: bool = False,
+    ) -> dict:
+        updated = service.update_project_status(
+            project_id(project_key),
+            status,
+            compact(
+                {
+                    "name": name,
+                    "key": key,
+                    "position": position,
+                    "is_started": is_started,
+                    "is_blocked": is_blocked,
+                    "is_terminal": is_terminal,
+                    "is_reopened": is_reopened,
+                }
+            ),
+        )
+        return public_statuses(updated, include_ids=include_ids)
+
     @mcp.tool(description="Create a Work Unit in a project key. Optionally provide a Work Unit key such as FM1.")
     def create_work_unit(
         project_key: str,

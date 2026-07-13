@@ -25,6 +25,17 @@ async def test_create_mcp_registers_image_attachment_tools():
 
 
 @pytest.mark.anyio
+async def test_create_mcp_registers_project_status_tools():
+    mcp = create_mcp()
+    tools = {tool.name: tool for tool in await mcp.list_tools()}
+
+    assert {"create_project_status", "update_project_status"} <= set(tools)
+    assert "project_key" in tools["create_project_status"].parameters["properties"]
+    assert "status" in tools["update_project_status"].parameters["properties"]
+    assert "include_ids" in tools["update_project_status"].parameters["properties"]
+
+
+@pytest.mark.anyio
 async def test_key_based_tools_do_not_require_numeric_ids():
     mcp = create_mcp()
     tools = {tool.name: tool for tool in await mcp.list_tools()}
