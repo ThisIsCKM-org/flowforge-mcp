@@ -25,6 +25,29 @@ def test_project_creation_seeds_statuses(service):
     assert status_names == ["Planning", "Todo", "In Progress", "Review", "Done", "Blocked", "Reopened"]
 
 
+def test_project_statuses_can_be_created_updated_and_used(service):
+    project = service.create_project({"name": "Launch"})
+
+    testing = service.create_project_status({"project_id": project["id"], "name": "Testing", "is_started": True})
+    updated = service.update_project_status(
+        project["id"],
+        "testing",
+        {"name": "QA Testing", "key": "qa_testing", "position": 2, "is_blocked": True},
+    )
+    task = service.create_task({"project_id": project["id"], "title": "Validate checkout", "status": "qa_testing"})
+
+    statuses = service.list_project_statuses(project["id"])
+
+    assert testing["key"] == "testing"
+    assert updated["name"] == "QA Testing"
+    assert updated["key"] == "qa_testing"
+    assert updated["position"] == 2
+    assert updated["is_started"] == 1
+    assert updated["is_blocked"] == 1
+    assert task["status"] == "QA Testing"
+    assert "QA Testing" in [status["name"] for status in statuses]
+
+
 def test_generated_keys_for_projects_work_units_and_tasks(service):
     project = service.create_project({"name": "Flowforge", "key": "FLOW"})
     unit = service.create_work_unit({"project_id": project["id"], "title": "Flowforge MCP v1", "key": "FM1"})

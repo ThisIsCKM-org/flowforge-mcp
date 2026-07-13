@@ -14,11 +14,13 @@ from .models import (
     CreateAttachment,
     CreateComment,
     CreateProject,
+    CreateProjectStatus,
     CreateProjectTemplate,
     CreateTask,
     CreateWorkUnit,
     UpdateComment,
     UpdateProject,
+    UpdateProjectStatus,
     UpdateTask,
     UpdateWorkUnit,
 )
@@ -206,6 +208,70 @@ class FlowForgeService:
                     (project_id,),
                 ).fetchall()
             )
+
+    def create_project_status(self, payload: CreateProjectStatus | dict) -> dict:
+        payload = CreateProjectStatus.model_validate(payload)
+        name = payload.name.strip()
+        if not name:
+            raise ValueError("Status name cannot be empty.")
+        key = normalize_status_key(payload.key or name)
+        if not key:
+            raise ValueError("Status key cannot be empty.")
+        with connect(self.config.db_path) as conn:
+            self._project_row(conn, payload.project_id)
+            position = payload.position
+            if position is None:
+                position = self._next_status_position(conn, payload.project_id)
+            cursor = conn.execute(
+                """
+                INSERT INTO project_statuses
+                (project_id, key, name, position, is_started, is_blocked, is_terminal, is_reopened)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    payload.project_id,
+                    key,
+                    name,
+                    position,
+                    int(payload.is_started),
+                    int(payload.is_blocked),
+                    int(payload.is_terminal),
+                    int(payload.is_reopened),
+                ),
+            )
+            status_id = int(cursor.lastrowid)
+        return self.get_project_status(status_id)
+
+    def get_project_status(self, status_id: int) -> dict:
+        with connect(self.config.db_path) as conn:
+            row = conn.execute("SELECT * FROM project_statuses WHERE id = ?", (status_id,)).fetchone()
+            if row is None:
+                raise ValueError(f"Project status {status_id} not found.")
+            return dict(row)
+
+    def update_project_status(self, project_id: int, status: str, payload: UpdateProjectStatus | dict) -> dict:
+        payload = UpdateProjectStatus.model_validate(payload)
+        updates = payload.model_dump(exclude_unset=True)
+        with connect(self.config.db_path) as conn:
+            status_id = self._status_id(conn, project_id, status)
+            if "name" in updates:
+                updates["name"] = updates["name"].strip()
+                if not updates["name"]:
+                    raise ValueError("Status name cannot be empty.")
+            if "key" in updates:
+                updates["key"] = normalize_status_key(updates["key"])
+                if not updates["key"]:
+                    raise ValueError("Status key cannot be empty.")
+            for flag in ("is_started", "is_blocked", "is_terminal", "is_reopened"):
+                if flag in updates:
+                    updates[flag] = int(updates[flag])
+            if updates:
+                assignments = ", ".join(f"{key} = ?" for key in updates)
+                conn.execute(
+                    f"UPDATE project_statuses SET {assignments} WHERE id = ?",
+                    [*updates.values(), status_id],
+                )
+        return self.get_project_status(status_id)
 
     def create_work_unit(self, payload: CreateWorkUnit | dict) -> dict:
         payload = CreateWorkUnit.model_validate(payload)
@@ -896,6 +962,19 @@ class FlowForgeService:
                     task["position"],
                 ),
             )
+
+    def _project_row(self, conn, project_id: int):
+        row = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"Project {project_id} not found.")
+        return row
+
+    def _next_status_position(self, conn, project_id: int) -> int:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(position), -1) + 1 AS next_position FROM project_statuses WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()
+        return int(row["next_position"])
 
     def _status_id(self, conn, project_id: int, status: str) -> int:
         row = conn.execute(
