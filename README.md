@@ -53,6 +53,12 @@ uv run flowforge-mcp
 
 When run manually, the stdio server waits for MCP JSON-RPC messages on stdin. Press `Ctrl-C` once to stop it.
 
+The top-level `server.py` entrypoint still runs the same local CLI behavior when invoked directly:
+
+```bash
+python3 server.py
+```
+
 For a shared office stack, run Streamable HTTP on a single MCP endpoint:
 
 ```bash
@@ -60,12 +66,6 @@ uv run flowforge-mcp streamable-http --host 127.0.0.1 --port 8765 --path /mcp
 ```
 
 Use `--allowed-host` and `--allowed-origin` when exposing the HTTP transport behind internal infrastructure. Keep `127.0.0.1` for local testing, and put authentication/reverse-proxy controls in front before exposing it to a wider network.
-
-You can also run the entrypoint directly:
-
-```bash
-python3 server.py
-```
 
 ## Connect Codex
 
